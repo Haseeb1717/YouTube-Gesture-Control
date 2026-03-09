@@ -1,76 +1,125 @@
-Active the virtual environment
-.\gesture_env\Scripts\Activate
+# YouTube Gesture Controller
 
-import cv2
-# some installations of opencv-python don't expose __version__, which pyscreeze
-# (used by pyautogui) expects when comparing versions.  Provide a fallback so
-# importing pyautogui doesn't crash.
-if not hasattr(cv2, "__version__"):
-    cv2.__version__ = "4.0.0"
+A Python program that uses **MediaPipe** and computer vision to control YouTube
+playback with hand gestures.  Designed for use on Windows with a webcam, the
+project interprets common motions—swipes, taps, poses—and maps them to
+YouTube keyboard shortcuts via `pyautogui`.
 
-import mediapipe as mp
-import pyautogui as pag
-import time
-from collections import deque
+---
 
-# MediaPipe configuration
-mp_hands = mp.solutions.hands
-mp_draw = mp.solutions.drawing_utils
+## 🧰 Requirements
 
-# choose color for landmarks/connections (BGR format): navy would be (128,0,0),
-# maroon is (0,0,128).  using maroon per user request.
-landmark_color = (0, 0, 128)
-connection_color = (0, 0, 128)
+- **Python 3.10 or 3.11** (3.9 may work but is untested).  The virtual
+  environment in this repo was created with 3.10.
+- A webcam accessible by OpenCV.
+- Windows 10/11 (some key events rely on the Win32 virtual-key codes).
 
-# allow two hands so keyboard can be used with either
-hands = mp_hands.Hands(
-    max_num_hands=2,
-    min_detection_confidence=0.7,
-    min_tracking_confidence=0.7,
-)
+### Python packages
+Install into the provided `gesture_env` virtual environment:
 
-# indices for fingertips
-finger_tips = [4, 8, 12, 16, 20]
+```powershell
+cd "c:\Users\operation\Downloads\youtube guesture"
+python -m venv gesture_env       # only if not already created
+.\gesture_env\Scripts\activate
+pip install -r requirements.txt  # see section below
+```
 
-# gesture variables
-cooldown = 1
-last_action_time = 0
-x_history = deque(maxlen=6)
-prev_index_y = None
-prev_finger_sum = None
+`requirements.txt` should list at least:
 
-# virtual keyboard toggle button (not used any more)
-# kept coordinates in case we want a status indicator later
-button_x, button_y = 50, 400
-button_w, button_h = 200, 60
-keyboard_cooldown = 1
-last_keyboard = 0
+```
+opencv-python>=4.7
+mediapipe>=0.10
+pyautogui>=0.9
+numpy
+```
 
-# keyboard state
-keyboard_visible = False    # become true when two hands appear
-input_text = ""
-hovered_key = None
-hover_start = 0
-key_cooldown = 0.8  # seconds of hover to trigger key
-last_cursor_toggle = 0
-show_cursor = True
+> 💡 The project uses `pyautogui` to send keyboard events, so make sure the
+> script has permission to control the system (some antivirus or privacy
+> settings may block it).
 
-# colors for keyboard theme
-key_bg = (30, 30, 30)         # dark grey
-key_bg_alt = (50, 50, 50)     # slightly lighter for hovered
-key_outline = (200, 200, 200) # light grey for border and labels
-text_color = (235, 235, 235)  # off-white for key text
-input_bg = (20, 20, 20)       # near-black for input display
+---
 
-# map for icon text on special keys
-key_icons = {"BACK": "⌫", "SPACE": "␣", "ENT": "↵"}
+## 🚀 Running the Application
 
-# layout parameters (will be reused each frame)
-rows = ["QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"]
-extra_row = ["SPACE", "BACK", "ENT"]
+Once dependencies are installed, run:
 
-# helper routines for drawing
+```powershell
+python main.py
+```
 
+A window titled **"YouTube Gesture Controller"** will appear showing the camera
+feed with landmarks drawn on detected hands.  Keep a YouTube video open and
+make gestures in front of the camera; corresponding keyboard shortcuts will be
+sent to the active window.
+
+Press `q` in the camera window to quit at any time.
+
+---
+
+## 🎯 Supported Gestures
+
+| Gesture                      | Description                           | YouTube Action        |
+|-----------------------------|---------------------------------------|-----------------------|
+| Open-hand swipe right/left  | Whole-hand horizontal movement        | Next / Previous video |
+| Open-hand swipe up/down     | Whole-hand vertical movement          | Fullscreen / Exit     |
+| Single-index finger raised  | Toggle play / pause                   | Spacebar              |
+| Tap (index finger drop)     | Quick poke below pip then lift        | Spacebar (fallback)   |
+| Two fingers (index+middle)  | Hold to raise volume                  | Volume Up (hold)      |
+| Three fingers (index+middle+ring) | Hold to lower volume         | Volume Down (hold)    |
+| Thumbs-up                   | Static thumbs-up pose                 | Like video (`l`)      |
+| Fist                        | Skip ad (first time) / fullscreen     | `l` / `f`             |
+
+> ✨ The library distinguishes between **whole-hand** and **finger-based**
+> gestures so that an open-hand swipe doesn’t accidentally trigger a volume
+> change or play/pause command.
+
+Additional feature: a virtual keyboard pixel-perfectly tracks two index
+fingers when two hands are present.  Hover over a key for ~0.8 s to type it.
+
+---
+
+## 🛠 Implementation Notes
+
+- Uses MediaPipe's `Hands` solution with `max_num_hands=2` and moderate
+  confidence thresholds.
+- Gesture logic is stateful: motion histories ensure swipes are **monotonic**
+  and exceed a normalized threshold before activating, reducing false
+  positives.
+- Cool-down timers prevent repeated triggers from jitter.
+- Play/pause is recognized as either a finger-only configuration or a tap
+  motion, whichever is detected first.
+
+The primary source file is `main.py`; feel free to modify the thresholds or add
+new gestures.
+
+---
+
+## ✅ Tips for Best Results
+
+1. Ensure your hand is completely within the camera frame and fairly well-lit.
+2. Avoid rapid camera movement or background clutter that could confuse
+   landmark detection.
+3. Keep a little distance (30‑50 cm) between your hand and the webcam.
+4. If swipes are unreliable, adjust `swipe_threshold` or history length near
+   the top of `main.py`.
+
+---
+
+## 📄 License
+
+This project is provided **as-is** for personal and educational use.  No
+licenses are asserted for third-party packages; please review those projects
+for their terms.
+
+---
+
+## 🎬 Acknowledgments
+
+- [MediaPipe](https://developers.google.com/mediapipe) for high-quality hand
+  landmark detection.
+- `pyautogui` for convenient cross-platform keyboard control.
+
+Enjoy controlling YouTube with just your hands! 👋
 def draw_rounded_rect(frame, x, y, w, h, color, thickness=0, r=10):
     # draw rectangle with rounded corners by overlaying circles at the corners
     # thickness=0 means filled
