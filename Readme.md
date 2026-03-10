@@ -34,10 +34,6 @@ numpy
 > keystrokes; ensure the script is allowed to control the desktop.
 
 ---
-> script has permission to control the system (some antivirus or privacy
-> settings may block it).
-
----
 
 ## 🚀 Running the Application
 
