@@ -29,22 +29,41 @@ hands = mp_hands.Hands(
 finger_tips = [4, 8, 12, 16, 20]
 
 # gesture variables
-cooldown = 1
+# make gestures feel more responsive by using shorter cooldowns
+cooldown = 0.5
 last_action_time = 0
-x_history = deque(maxlen=8)
-y_history = deque(maxlen=8)
+
+# swipe tuning constants – adjust these values to fine‑tune behaviour
+SWIPE_HISTORY = 4                  # how many frames to accumulate before evaluatingllllllll
+HORIZONTAL_THRESHOLD = 0.06        # normalized distance required for left/right swipe
+VERTICAL_THRESHOLD = 0.06          # used for up/down swipe
+VERTICAL_DRIFT_FACTOR = 1.5        # allow this multiplier of horiz threshold for vertical drift check
+MONOTONIC_TOLERANCE = 0.005        # allowed reversal per frame when checking monotonic motion
+ALLOWED_REVERSALS = 1              # how many small reversals to tolerate in x-history
+MISS_LIMIT = 2                     # number of non‑candidate frames tolerated
+
+# shorter histories require fewer frames for a swipe
+x_history = deque(maxlen=SWIPE_HISTORY)
+y_history = deque(maxlen=SWIPE_HISTORY)
 # track whether each stored y-value came from a valid swipe candidate
-y_candidate_history = deque(maxlen=8)
+y_candidate_history = deque(maxlen=SWIPE_HISTORY)
 # track whether each stored x-value came from a valid swipe candidate
-x_candidate_history = deque(maxlen=8)
+x_candidate_history = deque(maxlen=SWIPE_HISTORY)
+
+# counters used during detection
+x_miss = 0
+y_miss = 0
+
 prev_finger_sum = None
 prev_fingers = None        # remember last finger configuration
 volume_hold = None        # "up" or "down" when two/three-finger gesture held
-prev_tip_y = None         # for tap detection
-# state for play/pause tap: track when index tip has gone below the pip
+# add some state to stabilise volume detection
+volume_direction = None   # candidate direction seen over recent frames
+volume_counter = 0        # number of consecutive frames matching volume_direction
+prev_tip_y = None         # for tap detection (now mostly unused)
+# play/pause tap state (we'll mostly rely on finger configuration)
 tap_down = False
 # tap timing parameters
-tap_start = None
 TAP_TIMEOUT = 0.5        # seconds allowed between down and up
 TAP_DOWN_THRESH = 0.03   # how far below pip the tip must drop
 TAP_UP_THRESH = 0.005    # how far above pip it must return
@@ -156,6 +175,8 @@ while True:
             y_candidate_history.clear()
             x_candidate_history.clear()
             volume_hold = None
+            volume_direction = None
+            volume_counter = 0
             prev_finger_sum = None
             prev_tip_y = None
             tap_down = False
@@ -195,53 +216,59 @@ while True:
                         pip = lm[finger_tips[i]-2].y
                         fingers.append(1 if tip < pip else 0)
 
-                    # two/three finger volume hold – only trigger when exactly
-                    # two or three fingers are extended (index+middle or +ring).
-                    # this prevents an open-hand swipe from also changing volume.
+                    # two/three finger volume hold – stabilise detection over
+                    # several frames so minor jitters don't cancel the hold.
                     finger_count = sum(fingers)
-                    up_gesture = finger_count == 2 and fingers[1] == 1 and fingers[2] == 1
-                    down_gesture = finger_count == 3 and fingers[1] == 1 and fingers[2] == 1 and fingers[3] == 1
-                    # prioritize three-finger decrease when both hold true
-                    if down_gesture:
-                        if volume_hold != "down":
+                    # determine the current candidate direction (None/"up"/"down")
+                    current_vol = None
+                    if finger_count >= 3 and fingers[1] == 1 and fingers[2] == 1 and fingers[3] == 1:
+                        current_vol = "down"
+                    elif finger_count >= 2 and fingers[1] == 1 and fingers[2] == 1:
+                        current_vol = "up"
+                    # update direction counter
+                    if current_vol == volume_direction:
+                        volume_counter += 1
+                    else:
+                        volume_direction = current_vol
+                        volume_counter = 1 if current_vol else 0
+                    # only change hold state after seeing the same candidate for
+                    # a few frames (helps with shaky detection)
+                    if volume_counter >= 3:
+                        if volume_direction and volume_direction != volume_hold:
+                            # switch keys
                             if volume_hold == "up":
                                 pag.keyUp("volumeup")
-                            pag.keyDown("volumedown")
-                            volume_hold = "down"
-                            gesture_name = "Volume Down"
-                    elif up_gesture:
-                        if volume_hold != "up":
-                            # release opposite key if held
-                            if volume_hold == "down":
+                            elif volume_hold == "down":
                                 pag.keyUp("volumedown")
-                            pag.keyDown("volumeup")
-                            volume_hold = "up"
-                            gesture_name = "Volume Up"
-                    else:
-                        if volume_hold == "up":
-                            pag.keyUp("volumeup")
-                        elif volume_hold == "down":
-                            pag.keyUp("volumedown")
-                        volume_hold = None
+                            pag.keyDown("volume" + volume_direction)  # "volumeup" or "volumedown"
+                            volume_hold = volume_direction
+                            gesture_name = "Volume " + ("Up" if volume_direction == "up" else "Down")
+                        elif volume_direction is None and volume_hold:
+                            # release if gesture ended
+                            if volume_hold == "up":
+                                pag.keyUp("volumeup")
+                            elif volume_hold == "down":
+                                pag.keyUp("volumedown")
+                            volume_hold = None
 
                     # simple one-finger toggle: when configuration becomes exactly
                     # index-only (other fingers folded) fire play/pause immediately.
-                    # this tends to be more reliable than vertical pokes.
+                    # this is reliable and avoids the poke state machine.
                     if fingers == [0,1,0,0,0] and prev_fingers != fingers and now - last_action_time > cooldown:
                         pag.press("space")
                         gesture_name = "Play / Pause"
                         last_action_time = now
                     prev_fingers = list(fingers) if fingers else None
 
-                    # tap for play/pause – smoother state machine with timing
+                    # we still keep tap state around in case the user prefers a poke,
+                    # but it is no longer the primary mechanism and has a higher
+                    # threshold/timeout to avoid false triggers.
                     index_tip = lm[8].y
                     index_pip = lm[6].y
                     if prev_tip_y is not None:
-                        # detect a quick downward poke below the pip
                         if not tap_down and index_tip > index_pip + TAP_DOWN_THRESH and prev_tip_y <= index_tip:
                             tap_down = True
                             tap_start = now
-                        # once we think a tap is underway, look for a fast return
                         if tap_down:
                             if (index_tip < index_pip - TAP_UP_THRESH and
                                 now - tap_start < TAP_TIMEOUT and
@@ -251,7 +278,6 @@ while True:
                                 last_action_time = now
                                 tap_down = False
                                 tap_start = None
-                            # abort if takes too long or hand moves away
                             elif now - tap_start > TAP_TIMEOUT:
                                 tap_down = False
                                 tap_start = None
@@ -290,8 +316,9 @@ while True:
                 elif finger_count == 1 and fingers[1] == 1:
                     vertical_candidate = True
 
-            # collect motion data only while the candidate is maintained
+            # collect motion data, allowing a couple of frames of loss
             if vertical_candidate:
+                y_miss = 0
                 # for vertical movement prefer index-tip but fall back to palm
                 if idy_list:
                     avg_idy = sum(idy_list)/len(idy_list)
@@ -302,56 +329,62 @@ while True:
                     y_history.append(avg_py)
                     y_candidate_history.append(True)
             else:
-                y_history.clear()
-                y_candidate_history.clear()
+                y_miss += 1
+                if y_miss > MISS_LIMIT:
+                    y_history.clear()
+                    y_candidate_history.clear()
 
             if horizontal_candidate:
+                x_miss = 0
                 # horizontal swipes use palm/wrist centre
                 if palm_x_list:
                     avg_px = sum(palm_x_list)/len(palm_x_list)
                     x_history.append(avg_px)
                     x_candidate_history.append(True)
             else:
-                x_history.clear()
-                x_candidate_history.clear()
+                x_miss += 1
+                if x_miss > MISS_LIMIT:
+                    x_history.clear()
+                    x_candidate_history.clear()
 
-            swipe_threshold = 0.12  # normalized distance threshold for clearer swipes
+            # normalized distance threshold for clearer swipes
+            swipe_threshold = HORIZONTAL_THRESHOLD  # use tuning constant
             # horizontal swipes (next/previous video) using open-hand centre
             if len(x_history) >= x_history.maxlen and all(x_candidate_history) and now - last_action_time > cooldown:
                 movement = x_history[-1] - x_history[0]
-                # require little vertical drift to avoid diagonals
+                # allow a bit of vertical drift but don't insist on strict monotonicity
                 vert_ok = True
                 if len(y_history) >= y_history.maxlen:
                     vert_move = abs(y_history[-1] - y_history[0])
-                    vert_ok = vert_move < swipe_threshold/2
-                # ensure motion is consistently to one side (monotonic)
-                deltas = [x_history[i+1] - x_history[i] for i in range(len(x_history)-1)]
-                monotonic_right = all(d > 0 for d in deltas)
-                monotonic_left = all(d < 0 for d in deltas)
-                if movement > swipe_threshold and vert_ok and monotonic_right:
-                    pag.hotkey("shift", "n")
-                    gesture_name = "Next Video"
-                    last_action_time = now
-                    x_history.clear()
-                    x_candidate_history.clear()
-                elif movement < -swipe_threshold and vert_ok and monotonic_left:
-                    pag.hotkey("shift", "p")
-                    gesture_name = "Previous Video"
-                    last_action_time = now
-                    x_history.clear()
-                    x_candidate_history.clear()
+                    vert_ok = vert_move < swipe_threshold * 1.5
+                # check that the x values moved mostly in one direction, allowing a
+                # couple of tiny reversals to cope with jitter
+                dirs = [x_history[i+1] - x_history[i] for i in range(len(x_history)-1)]
+                pos = sum(1 for d in dirs if d > -MONOTONIC_TOLERANCE)
+                neg = sum(1 for d in dirs if d < MONOTONIC_TOLERANCE)
+                # require all but ALLOWED_REVERSALS elements to agree
+                monotonic = pos >= len(dirs) - ALLOWED_REVERSALS or neg >= len(dirs) - ALLOWED_REVERSALS
+                if vert_ok and monotonic:
+                    if movement > swipe_threshold:
+                        pag.hotkey("shift", "n")
+                        gesture_name = "Next Video"
+                        last_action_time = now
+                        x_history.clear()
+                        x_candidate_history.clear()
+                    elif movement < -swipe_threshold:
+                        pag.hotkey("shift", "p")
+                        gesture_name = "Previous Video"
+                        last_action_time = now
+                        x_history.clear()
+                        x_candidate_history.clear()
             # vertical swipes for fullscreen toggle (open hand or single index)
             if len(y_history) >= y_history.maxlen and all(y_candidate_history) and now - last_action_time > cooldown:
                 movement = y_history[0] - y_history[-1]  # positive means upward motion
                 horiz_ok = True
                 if len(x_history) >= x_history.maxlen:
                     horiz_move = abs(x_history[-1] - x_history[0])
-                    horiz_ok = horiz_move < swipe_threshold/2
-                # check monotonic vertical movement as well
-                y_deltas = [y_history[i+1] - y_history[i] for i in range(len(y_history)-1)]
-                monotonic_up = all(d < 0 for d in y_deltas)
-                monotonic_down = all(d > 0 for d in y_deltas)
-                if movement > swipe_threshold and horiz_ok and monotonic_up:
+                    horiz_ok = horiz_move < VERTICAL_THRESHOLD
+                if movement > VERTICAL_THRESHOLD and horiz_ok:
                     pag.press("f")
                     gesture_name = "Fullscreen"
                     last_action_time = now
@@ -359,7 +392,7 @@ while True:
                     y_candidate_history.clear()
                     x_history.clear()
                     x_candidate_history.clear()
-                elif movement < -swipe_threshold and horiz_ok and monotonic_down:
+                elif movement < -swipe_threshold and horiz_ok:
                     pag.press("esc")
                     gesture_name = "Exit Fullscreen"
                     last_action_time = now
@@ -406,27 +439,6 @@ while True:
                     hovered_key = None
                     hover_start = now
 
-        # info overlay
-        cv2.putText(frame, f"Fingers: {fingers}", (10,40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
-        if gesture_name:
-            cv2.putText(frame, f"Gesture: {gesture_name}", (10,80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2)
-        info_lines = [
-            "Supported Gestures:",
-            "Swipe right/left – Next/Prev video (open hand swipe)",
-            "Swipe up – Fullscreen (one finger or open hand)",
-            "Swipe down – Exit fullscreen",
-            "Victory sign (2 fingers) – Hold to raise volume",
-            "Three fingers – Hold to lower volume",
-            "Index down-tap – Play/Pause",
-            "Thumbs up – Like video",
-            "Fist – Skip ad",
-            "Clear key – erase all text",
-            "Virtual keyboard always visible (CAP key toggles case)"
-        ]
-        y0 = 110
-        for line in info_lines:
-            cv2.putText(frame, line, (10,y0), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200,200,200), 1)
-            y0 += 25
 
         cv2.imshow("YouTube Gesture Controller", frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):
